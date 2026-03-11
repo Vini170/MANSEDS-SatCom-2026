@@ -1,0 +1,35 @@
+#Importing
+import cv2
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+
+#Getting Images
+print(os.getcwd())
+left_img = cv2.imread("/Users/viniciuslisboa/Desktop/MANSEDS/LeftParallaxImage.jpeg", cv2.IMREAD_GRAYSCALE)
+right_img = cv2.imread("/Users/viniciuslisboa/Desktop/MANSEDS/RightParallaxImage.jpeg", cv2.IMREAD_GRAYSCALE)
+
+#Creating Parallax Image
+stereo = cv2.StereoBM_create(numDisparities=16*5, blockSize=15)
+disparity = stereo.compute(left_img, right_img)
+disparity_norm = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX)
+disparity = cv2.GaussianBlur(disparity, (5,5), 0)
+cv2.imshow("Left Image", left_img)
+cv2.imshow("Right Image", right_img)
+cv2.imshow("Parallax", disparity_norm.astype('uint8'))
+
+#Creating Graph
+h, w = disparity.shape
+a1 = plt.axes(projection="3d")
+x_data = np.arange(0, w)
+y_data = np.arange(0, h)
+X, Y = np.meshgrid(x_data, y_data)
+Z = disparity
+
+a1.plot_surface(X, Y, Z, cmap="Spectral")
+
+#More can be added
+
+plt.show()
+#65mm between cameras
+
