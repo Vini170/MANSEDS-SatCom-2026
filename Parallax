@@ -1,35 +1,120 @@
-#Importing
 import cv2
 import numpy as np
-import os
 import matplotlib.pyplot as plt
 
-#Getting Images
-print(os.getcwd())
-left_img = cv2.imread("/Users/viniciuslisboa/Desktop/MANSEDS/LeftParallaxImage.jpeg", cv2.IMREAD_GRAYSCALE)
+# Load Images 
+left_img  = cv2.imread("/Users/viniciuslisboa/Desktop/MANSEDS/LeftParallaxImage.jpeg", cv2.IMREAD_GRAYSCALE)
 right_img = cv2.imread("/Users/viniciuslisboa/Desktop/MANSEDS/RightParallaxImage.jpeg", cv2.IMREAD_GRAYSCALE)
 
-#Creating Parallax Image
-stereo = cv2.StereoBM_create(numDisparities=16*5, blockSize=15)
-disparity = stereo.compute(left_img, right_img)
-disparity_norm = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX)
-disparity = cv2.GaussianBlur(disparity, (5,5), 0)
-cv2.imshow("Left Image", left_img)
-cv2.imshow("Right Image", right_img)
-cv2.imshow("Parallax", disparity_norm.astype('uint8'))
+kernel = np.array([[0, -1, 0],
+                   [-1, 5,-1],
+                   [0, -1, 0]])
+left_img  = cv2.filter2D(left_img,  -1, kernel)
+right_img = cv2.filter2D(right_img, -1, kernel)
 
-#Creating Graph
-h, w = disparity.shape
-a1 = plt.axes(projection="3d")
-x_data = np.arange(0, w)
-y_data = np.arange(0, h)
-X, Y = np.meshgrid(x_data, y_data)
-Z = disparity
+block_size = 11
+num_disp   = 112   # must be multiple of 16
 
-a1.plot_surface(X, Y, Z, cmap="Spectral")
+stereo = cv2.StereoSGBM_create(
+    minDisparity     = 0,
+    numDisparities   = num_disp,
+    blockSize        = block_size,
+    P1               = 8  * block_size ** 2,   # smoothness penalty (small)
+    P2               = 32 * block_size ** 2,   # smoothness penalty (large)
+    disp12MaxDiff    = 1,      # left-right consistency check
+    uniquenessRatio  = 10,     # reject ambiguous pixel matches
+    speckleWindowSize= 120,    # remove small noise blobs
+    speckleRange     = 32,
+    mode             = cv2.STEREO_SGBM_MODE_SGBM_3WAY
+)
 
-#More can be added
+disparity_raw = stereo.compute(left_img, right_img).astype(np.float32) / 16.0
 
+# Getting rid of noise
+valid_mask = disparity_raw > 0
+disparity_clean = disparity_raw.copy()
+disparity_clean[~valid_mask] = 0
+right_matcher = cv2.ximgproc.createRightMatcher(stereo)
+
+# Recompute on original (unsharpened) images for WLS
+left_orig  = cv2.imread("/Users/viniciuslisboa/Desktop/MANSEDS/LeftParallaxImage.jpeg",  cv2.IMREAD_GRAYSCALE)
+right_orig = cv2.imread("/Users/viniciuslisboa/Desktop/MANSEDS/RightParallaxImage.jpeg", cv2.IMREAD_GRAYSCALE)
+disp_left  = stereo.compute(left_orig,  right_orig).astype(np.float32) / 16.0
+disp_right = right_matcher.compute(right_orig, left_orig).astype(np.float32) / 16.0
+
+wls_filter = cv2.ximgproc.createDisparityWLSFilter(stereo)
+wls_filter.setLambda(10000)    # higher = smoother (try 5000–20000)
+wls_filter.setSigmaColor(1.5) # edge sensitivity (try 0.8–2.0)
+disparity_wls = wls_filter.filter(disp_left, left_orig, disparity_map_right=disp_right)
+disparity_wls = np.clip(disparity_wls, 0, num_disp).astype(np.float32)
+
+#Blur
+disparity_final = cv2.medianBlur(disparity_wls, 5)
+
+#Visualise
+disparity_norm = cv2.normalize(disparity_final, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+disparity_color = cv2.applyColorMap(disparity_norm, cv2.COLORMAP_PLASMA)
+
+fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+axes[0].imshow(left_orig,       cmap="gray");   axes[0].set_title("Left Image");      axes[0].axis("off")
+axes[1].imshow(right_orig,      cmap="gray");   axes[1].set_title("Right Image");     axes[1].axis("off")
+axes[2].imshow(disparity_color, cmap="plasma"); axes[2].set_title("Disparity (WLS)"); axes[2].axis("off")
+plt.tight_layout()
 plt.show()
-#65mm between cameras
 
+#Convert disparity to real-world depth (metres)
+f = 808.0   # focal length in pixels
+B = 0.065   # baseline in metres (65mm)
+
+h, w = disparity_final.shape
+
+# Use disparity for Z shape (preserves variation), colour by depth in metres
+disp_plot = disparity_final.copy()
+disp_plot[disp_plot <= 0] = np.nan
+
+# Depth in metres for the colorbar
+depth_colour = np.where(disp_plot > 0, (f * B) / (disp_plot + 1e-6), np.nan)
+depth_colour = np.clip(depth_colour, 0.1, 2.0)
+
+# Normalise depth to 0–1 for colouring
+depth_norm = (depth_colour - 0.1) / (2.0 - 0.1)
+depth_norm = np.nan_to_num(depth_norm, nan=0)
+
+# Fill NaN in disparity with local median so surface has no holes
+median_disp = np.nanmedian(disp_plot)
+disp_filled = np.where(np.isnan(disp_plot), median_disp, disp_plot)
+
+# Pixel grid (X/Y stay as pixels — depth variation is in Z)
+xs = np.arange(0, w)
+ys = np.arange(0, h)
+X_grid, Y_grid = np.meshgrid(xs, ys)
+
+step = 6
+fig2 = plt.figure(figsize=(10, 7))
+ax   = fig2.add_subplot(111, projection="3d")
+
+# facecolors from depth-in-metres so colorbar is meaningful
+cmap   = plt.get_cmap("Spectral")
+colors = cmap(depth_norm[::step, ::step])
+
+surf = ax.plot_surface(
+    X_grid[::step, ::step],
+    Y_grid[::step, ::step],
+    disp_filled[::step, ::step],
+    facecolors  = colors,
+    linewidth   = 0,
+    antialiased = True
+)
+
+# Manually add a colorbar scaled to metres
+sm = plt.cm.ScalarMappable(cmap="Spectral", norm=plt.Normalize(vmin=0.1, vmax=2.0))
+sm.set_array([])
+fig2.colorbar(sm, ax=ax, label="Depth (m)", shrink=0.5)
+
+ax.set_title("3D Reconstruction (depth coloured in metres)")
+ax.set_xlabel("X (px)")
+ax.set_ylabel("Y (px)")
+ax.set_zlabel("Disparity")
+ax.invert_yaxis()
+plt.tight_layout()
+plt.show()
